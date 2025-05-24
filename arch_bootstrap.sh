@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-# Generate ANSI escape sequences using Portable Terminal Control (tput)
+# Generate ANSI escape sequences dynamically using Portable Terminal Control (tput)
 if [ -t 1 ]; then
     RED=$(tput setaf 1)
     GREEN=$(tput setaf 2)
@@ -16,7 +16,7 @@ if [ -t 1 ]; then
     BOLD=$(tput bold)
     RESET=$(tput sgr0)
 else
-    # No colors if redirected (e.g., to a file)
+    # No colors if redirected
     RED=""
     GREEN=""
     YELLOW=""
@@ -25,9 +25,10 @@ else
     RESET=""
 fi
 
-echo "${BOLD}${RED}WARNING: Continuing with this script will completely erase all data on /dev/nvme0n1${RESET}"
-read -rp "Type 'ERASE' to continue and accept... " confirm
+echo "${BOLD}${RED}WARNING: Continuing with this script will completely erase all data on the system.${RESET}"
+read -rp "${RED}Type 'ERASE' to continue and accept... ${RESET}" confirm
 [[ "$confirm" != "ERASE" ]] && exit 1
+
 read -rsp "Enter LUKS passphrase: " luks_pass && echo
 read -rsp "Verify passphrase: " luks_verify && echo
 [[ "$luks_pass" != "$luks_verify" ]] && echo "Passphrase mismatch." && exit 1
@@ -41,9 +42,9 @@ wipefs --all /dev/nvme0n1
 parted --script /dev/nvme0n1 mklabel gpt
 
 # Partition layout (1TB NVMe):
-# p1: EFI System Partition (FAT32, ~1GiB)
+# p1: EFI System Partition (FAT32, 1GiB)
 # p2: /boot (ext4, 1GiB)
-# p3: swap (encrypted with fixed key, ~64GiB)
+# p3: swap (encrypted with fixed key, ~65GiB)
 # p4: LVM container (remainder of disk)
 
 # Create ESP partition, starts at 1MiB for wider firmware compatability/per UEFI specification
@@ -57,7 +58,7 @@ parted --script /dev/nvme0n1 \
     mkpart primary ext4 1025MiB 2049MiB \
     name 2 BOOT
 
-# Create swap partition, allocate ~64GiB to allow for hibernation
+# Create swap partition, allocate ~65GiB to allow for hibernation
 parted --script /dev/nvme0n1 \
     mkpart primary linux-swap 2049MiB 68657MiB \
     name 3 SWAP
@@ -79,11 +80,11 @@ chmod 600 /root/swap.key
 cryptsetup luksFormat --type luks2 /dev/nvme0n1p3 \
     --batch-mode --key-file /root/swap.key
 
-# Encrypt LVM PV with passphrase, then clear from memory
+# Encrypt LVM PV with passphrase
 echo -n "$luks_pass" | cryptsetup luksFormat --type luks2 /dev/nvme0n1p4 -
 echo -n "$luks_pass" | cryptsetup open /dev/nvme0n1p4 lvm_crypt -
 
-# Enroll YubiKey for FIDO2 on raw partitions
+# Enroll YubiKey for FIDO2 on root and swap partitions
 echo '>>> Enroll FIDO2 for root (touch YubiKey when prompted)'
 systemd-cryptenroll --fido2-device=auto /dev/nvme0n1p4
 
@@ -96,10 +97,10 @@ systemd-cryptenroll \
     --unlock-key-file=/root/swap.key \
     /dev/nvme0n1p3
 
-# Clear sensitive variable
-unset luks_verify
+echo ">>> Verifing FIDO2 enrollment for swap partition:"
+systemd-cryptenroll --fido2-device=auto /dev/nvme0n1p3 --fido2-credential-algorithm=es256 --fido2-with-user-presence=yes
 
-# Initialive LVM and mark /dev/mapper/lvm_crypt (LUKS‐unlocked block device) as an LVM Physical Volume
+# Initialive LVM and mark /dev/mapper/lvm_crypt (LUKS‐locked block device) as an LVM Physical Volume
 pvcreate /dev/mapper/lvm_crypt
 
 # Create VG(0) that includes the PV that was just initialized
@@ -108,11 +109,15 @@ vgcreate vg0 /dev/mapper/lvm_crypt
 # Allocated remaining space in vg0 to a new logical volume named btrfs, one LV allows for single encryption when using btrfs
 lvcreate -l 100%FREE vg0 -n btrfs
 
-# Format the LV as btrfs and mount TEMPORARILY to make subvolumes below
+# Format the fs that sits on top the LV as btrfs and mount TEMPORARILY to make subvolumes below
 mkfs.btrfs -L BTRFS /dev/vg0/btrfs
 mount /dev/vg0/btrfs /mnt
 
-# Create subvolumes: root, home, var, opt
+# Subvolumes Layout:
+# root: Does an update break the system? Only need to roll back the root dir
+# home: Separate personal files from system state for independent backup/restore cycles
+#  var: Isolate logs, caches, and databases that change frequently and can grow large
+#  opt: Manage third-party software independently from core system packages
 btrfs subvolume create /mnt/@
 btrfs subvolume create /mnt/@home
 btrfs subvolume create /mnt/@var
@@ -132,36 +137,34 @@ mount -o subvol=@opt /dev/vg0/btrfs /mnt/opt
 mount /dev/nvme0n1p2 /mnt/boot # ext4 /boot
 mount /dev/nvme0n1p1 /mnt/efi  # ESP
 
-# Packages including base system and FIDO2/Yubikey tools
+# Base system packages for minimal setup
 packages=(
-    amd-ucode  # AMD microprossesor firmware and security updates
-    arch-install-scripts
-    base       # Recommended for minimal system
-    base-devel # Package group containing common build tools: gcc, make, binutils (Required for AUR and makepkg)
-    btrfs-progs
-    fwupd
-    git            # Version control (Required to clone libu2f-host, which is recommended when using pcsc)
-    iwd
-    less
-    linux          # The Linux kernel
-    linux-firmware # Firmware blobs for Wi-Fi, GPUs, etc.
-    lvm2           # Logical Volume Manager utilities: pvcreate, vgcreate, lvcreate
-    mkinitcpio-systemd-tool
-    mkinitcpio
+    amd-ucode                    # AMD microprossesor firmware and security updates
+    arch-install-scripts         # Needed for genfstab utility while chrooting
+    base                         # Recommended for minimal system
+    base-devel                   # Package group containing common build tools: gcc, make, binutils (Required for AUR and makepkg)
+    btrfs-progs                  # User-space utilities for managing btrfs filesystems
+    fwupd                        # Automate firmware updates
+    git                          # Version control (Required to clone libu2f-host, which is recommended when using pcsc)
+    iwd                          # iNet Wireless Daemon for WiFi connections using WPA
+    less                         # Text utility for scrolling through text based files via terminal
+    libfido2                     # Support for FIDO-U2F operations (Prefered over libuf2-host which is deprecated)
+    linux                        # The Linux kernel
+    linux-firmware               # Firmware blobs for Wi-Fi, GPUs, etc.
+    lvm2                         # Logical Volume Manager utilities: pvcreate, vgcreate, lvcreate
+    mkinitcpio-systemd-tool      # Provisioning tool for initramfs when using systemd
+    mkinitcpio                   # Bash script to create the initial ramdisk on boot
+    pcsc-tools                   # PC/SC smartcard utilities (pcsc_scan, etc.)
+    sbctl                        # Secure Boot key management and signing
+    sof-firmware                 # Open source audio drivers
+    vim                          # Open source text editor
     yubikey-manager              # Configure YubiKey
     yubikey-full-disk-encryption # Integrate YubiKey with LUKS (ykfde)
-    pcsc-tools                   # PC/SC smartcard utilities (pcsc_scan, etc.)
-    libfido2                     # Support for FIDO-U2F operations (Prefered over libuf2-host which is deprecated)
-    sbctl                        # Secure Boot key management and signing
-    sof-firmware
-    vim
 )
 
 pacstrap /mnt --noconfirm "${packages[@]}"
 
-# Copy swap.key into the to-be-installed system (must occur after pacstrap)
-#cp /root/swap.key /mnt/root/swap.key
-#chmod 600 /mnt/root/swap.key
+# Copy swap.key into the to target system (must occur after pacstrap)
 install -Dm600 /root/swap.key /mnt/root/swap.key
 
 # Generate fstab table for persistant mounting
@@ -185,7 +188,7 @@ read -rsp "Verify password: " ROOT_PASS2 && echo
 [[ "$ROOT_PASS" != "$ROOT_PASS2" ]] && echo "Passphrase mismatch." && exit 1
 
 # Chroot to start new bash shell with /mnt as root to modify target system
-arch-chroot /mnt /bin/bash << EOF
+arch-chroot /mnt /bin/bash <<EOF
 set -euo pipefail
 
 printf 'root:%q\n' "${ROOT_PASS}" | chpasswd
