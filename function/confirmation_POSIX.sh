@@ -12,6 +12,7 @@
 #      Ensures failures upstream are not silent/masked and trigger an exit.
 set -e
 set -u
+# pipefail is not POSIX compliant, check in subshell if pipefail is valid in this environment
 if (set -o | grep -q pipefail) 2>/dev/null; then
   set -o pipefail
 fi
@@ -23,13 +24,13 @@ if [ -f "${SCRIPT_DIR}/../utils/colors.sh" ]; then
 fi
 
 # ASCHII Values to handle on input loop
-ETX=$(printf '\003')    # ASCII 3 (Ctrl+C / EO‐Text)
-EOT=$(printf '\004')    # ASCII 4 (Ctrl+D / EO-Transmission)
-ESC=$(printf '\033')    # ASCII 27 (Escape key)
-DEL=$(printf '\177')    # ASCII 127 (Delete / Backspace)
-BS=$(printf '\010')     # ASCII 8 (Backspace, often Ctrl+H)
-NL=$(printf '\n')       # ASCII 10 (Line Feed / Newline)
-CR=$(printf '\r')       # ASCII 13 (Carriage Return)
+ETX=$(printf '\003')  # ASCII 3 (Ctrl+C / EO‐Text)
+EOT=$(printf '\004')  # ASCII 4 (Ctrl+D / EO-Transmission)
+ESC=$(printf '\033')  # ASCII 27 (Escape key)
+DEL=$(printf '\177')  # ASCII 127 (Delete / Backspace)
+BS=$(printf '\010')   # ASCII 8 (Backspace, often Ctrl+H)
+NL=$(printf '\n')     # ASCII 10 (Line Feed / Newline)
+CR=$(printf '\r')     # ASCII 13 (Carriage Return)
 
 # The expected confirmation word + length, note capitalization is required
 EXPECTED="ERASE"
@@ -114,7 +115,7 @@ while :; do
     
     # Check if current typed string is a valid prefix of EXPECTED in both length and spelling
     if [ "${#typed}" -le "${LENGTH}" ] && [ "${EXPECTED%${EXPECTED#${typed}}}" = "$typed" ]; then
-      # The entire typed string matches the beginning of EXPECTED, still must wait for confirmation
+      # The entire typed string is a subset of EXPECTED, print out char to terminal
       printf '%s%s%s' "$GREEN" "$char" "$RESET"
     else
       # Either too long or does not match the expected prefix
@@ -123,11 +124,15 @@ while :; do
   fi
 done
 
+# Revert back to sane stty settings for printing out
+stty sane
+
 # Confirmation has been supplied, check if input matches expected
 if [ "$typed" = "$EXPECTED" ]; then
-  printf '%sConfirmation accepted. Proceeding with installation...%s\n' "$GREEN" "$RESET"
+  printf '\n%sConfirmation accepted. Proceeding with installation...%s\n' "$GREEN" "$RESET"
+  exit 0
 else
-  printf '%sInvalid confirmation. Installation aborted.%s\n' "$RED" "$RESET"
-  printf '%sNo system modification have been made and no changes been written to disk.%s\n' "$RED" "$RESET"
+  printf '\n%sInvalid confirmation. Installation aborted.%s' "$RED" "$RESET"
+  printf '\n%sNo system modification have been made and no changes have been written to disk.%s\n' "$RED" "$RESET"
   exit 1
 fi
