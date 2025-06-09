@@ -5,73 +5,93 @@
 # Author: Joseph Mowery
 # Email: mowery.joseph@outlook.com
 
-# Enables strict mode, pipefail is not POSIX compliant so guard against it in executions cases of POSIX compliant environments
-# -e : Exit immediately on simple command fails (caveat of simple commands failing inside of if, while statements of combined with &&/||)
-# -u : Unset variables are treated as an error
-# -o : Changes default exit status of the pipeline from the last command to the rightmost command with a non-zero exit code.
-#      Ensures failures upstream are not silent/masked and trigger an exit.
+# Enables POSIX-compliant strict mode
+# -e : Exit immediately on simple command fails (caveat of simple commands failing inside of if, while statements of combined with &&/||).
+# -u : Unset variables are treated as an error.
+# -o pipefail: Changes default exit status of the pipeline from the last command to the rightmost command with a non-zero exit code.
+#              Ensures failures upstream are not silent/masked and trigger an exit.
 set -e
 set -u
-# pipefail is not POSIX compliant, check in subshell if pipefail is valid in this environment
-if (set -o | grep -q pipefail) 2>/dev/null; then
+# pipefail is not POSIX compliant, check in subshell if pipefail is valid in this environment.
+if (set -o ) 2>/dev/null | grep -q pipefail; then
   set -o pipefail
 fi
 
-# Source colors via absolute path resolution
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+# Resolve script directory using POSIX-compliant method.
+# This avoids potential issues with symlinks, relative paths, file names with hyphens and side effects of CDPATH.
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if [ -f "${SCRIPT_DIR}/../utils/colors.sh" ]; then
   . "${SCRIPT_DIR}/../utils/colors.sh"
+else
+    # Duplicate fallback from colors.sh incase file is not found.
+    # No colors if this is output is being redirected.
+    RED=""
+    GREEN=""
+    YELLOW=""
+    BLUE=""
+    BOLD=""
+    RESET=""
 fi
 
-# ASCHII Values to handle on input loop
-ETX=$(printf '\003')  # ASCII 3 (Ctrl+C / EO‐Text)
-EOT=$(printf '\004')  # ASCII 4 (Ctrl+D / EO-Transmission)
-ESC=$(printf '\033')  # ASCII 27 (Escape key)
-DEL=$(printf '\177')  # ASCII 127 (Delete / Backspace)
-BS=$(printf '\010')   # ASCII 8 (Backspace, often Ctrl+H)
-NL=$(printf '\n')     # ASCII 10 (Line Feed / Newline)
-CR=$(printf '\r')     # ASCII 13 (Carriage Return)
+# ASCHII Values for speical handling on input loop.
+readonly ETX=$(printf '\003')  # ASCII 3 (Ctrl+C / EO‐Text)
+readonly EOT=$(printf '\004')  # ASCII 4 (Ctrl+D / EO-Transmission)
+readonly ESC=$(printf '\033')  # ASCII 27 (Escape key)
+readonly DEL=$(printf '\177')  # ASCII 127 (Delete / Backspace)
+readonly S=$(printf '\010')    # ASCII 8 (Backspace / Ctrl+H)
+readonly NL=$(printf '\n')     # ASCII 10 (Line Feed / Newline)
+readonly CR=$(printf '\r')     # ASCII 13 (Carriage Return)
 
-# The expected confirmation word + length, note capitalization is required
-EXPECTED="ERASE"
-LENGTH=${#EXPECTED}
+# The expected confirmation word + length, note capitalization is required.
+readonly EXPECTED="ERASE"
+readonly LENGTH=${#EXPECTED}
 
-# Promp user with warning message and text confirmation
+# Prompt user with warning message and text confirmation.
 printf '%s%sWARNING:%s Continuing with this script will completely erase all data on /dev/nvme0n1%s\n' \
   "$BOLD" "$RED" "$RESET" "$RESET"
 printf 'Type %s"%s"%s' "$BOLD" "$EXPECTED" "$RESET"
 printf ' to continue and accept...\n'
 
-# Function to handle cleanup before exit
+# Function to handle cleanup on exit.
 cleanup() {
-  stty "$SAVED_STTY" # Restore original behavior
-  tput cnorm # Return to showing cursor
+  # Check if SAVED_STTY is set, if so restore terminal settings.
+  if [ -n "$SAVED_STTY" ]; then
+    stty "$SAVED_STTY" # Restore original behavior
+    tput cnorm # Return to visible cursor
+  fi
   printf '\n'
 }
 
-# Store current terminal settings to later restore
-# -g : Prints all settings
-SAVED_STTY=$(stty -g)
+# If the terminal is interactive then set trap (i.e., not piped or redirected).
+if [ -t 0 ]; then
+  # Store current terminal settings to later restore.
+  # -g : Prints all settings.
+  SAVED_STTY=$(stty -g)
 
-# Pseudo-hook to the cleanup function on termination associated signal events 
-# EXIT : On normal shell exit, only can be sent from inside the shell
-# INT (SIGINT) : On interupt signal of Ctrl + C 
-# TERM (SIGTERM) : Clean kill/termination, unlike EXIT can come from outside the shell
-trap cleanup EXIT INT TERM
+  # Set new terminal behavior.
+  # -echo : Disable terminal echo.
+  # raw : Set character-by-character input (non-line buffered).
+  stty -echo raw
 
-# Set new terminal behavior
-# -echo : Disable terminal echo
-# raw : Set character-by-character input (non-line buffered)
-stty -echo raw
+  # Hide cursor
+  tput civis
 
-# Hide cursor
-tput civis
+  # Pseudo-hook to the cleanup function on termination associated signal events.
+  # EXIT : On normal shell exit, only can be sent from inside the shell.
+  # INT (SIGINT) : On interupt signal of Ctrl + C.
+  # TERM (SIGTERM) : Clean kill/termination, unlike EXIT can come from outside the shell.
+  trap cleanup EXIT INT TERM
+else
+  # If not in an interactive terminal, set a simple newline trap and empty tty settings.
+  trap 'printf "\n"' EXIT INT TERM
+  SAVED_STTY=""
+fi
 
 typed=""
 position=0
 
 # Main user input loop, works one byte at a time
-# “while :” is POSIX‐safe (':' is a shell builtin that does nothing, returns 0)
+# “while :;” is POSIX‐safe (':' is a shell builtin that does nothing, returns 0)
 while :; do
   # Utilize dd to read in a single character
   # bs=1 : Set block size to 1 byte for 1 char
@@ -124,8 +144,8 @@ while :; do
   fi
 done
 
-# Revert back to sane stty settings for printing out
-stty sane
+# Revert back to sane stty settings for printing out if in interactive terminal
+[ -t 0 ] && stty sane
 
 # Confirmation has been supplied, check if input matches expected
 if [ "$typed" = "$EXPECTED" ]; then
